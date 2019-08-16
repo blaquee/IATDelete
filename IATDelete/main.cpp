@@ -1,9 +1,63 @@
 #include <Windows.h>
+#include <dbghelp.h>
 #include <iostream>
 #include <vector>
 #include <string>
 #include <algorithm>
 
+#pragma comment(lib, "dbghelp.lib")
+
+void RemoveImportReferences(PVOID Base)
+{
+    PIMAGE_DOS_HEADER pDosHeader = nullptr;
+    PIMAGE_NT_HEADERS pNtHeaders = nullptr;
+    PIMAGE_IMPORT_DESCRIPTOR pImportDesc = nullptr;
+    DWORD oldProtection;
+    //DWORD dwImportTableAddr;
+
+    pDosHeader = (PIMAGE_DOS_HEADER)Base;
+    pNtHeaders = (PIMAGE_NT_HEADERS)RVA_TO_ADDR(pDosHeader, pDosHeader->e_lfanew);
+
+
+    // Make it RW
+    VirtualProtect((PVOID)& pNtHeaders->OptionalHeader.DataDirectory,
+                   sizeof(IMAGE_OPTIONAL_HEADER), PAGE_READWRITE, &oldProtection);
+    pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = 0;
+    pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size = 0;
+    pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].Size = 0;
+    pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].VirtualAddress = 0;
+    //restore
+    VirtualProtect((PVOID)& pNtHeaders->OptionalHeader.DataDirectory,
+                   sizeof(IMAGE_OPTIONAL_HEADER), oldProtection, nullptr);
+    return;
+}
+ 
+void RemoveModuleEntry(PVOID Base, PIMAGE_IMPORT_DESCRIPTOR ImportDesc)
+{
+    PIMAGE_THUNK_DATA pThunkData = nullptr;
+    PIMAGE_IMPORT_BY_NAME pImportByName = nullptr;
+    std::string curDllName;
+
+    if (!Base || !ImportDesc)
+    {
+        std::cout << "Nothing happened" << std::endl;
+        return;
+    }
+    // Lets zero the module name
+    DWORD oldProtect;
+    VirtualProtect(ImportDesc,
+                   sizeof(IMAGE_IMPORT_DESCRIPTOR),
+                   PAGE_READWRITE, &oldProtect);
+    ImportDesc->Name = 0;
+    VirtualProtect(ImportDesc,
+                   sizeof(IMAGE_IMPORT_DESCRIPTOR),
+                   oldProtect, nullptr);
+
+    curDllName = (const char*)Base + ImportDesc->Name;
+    std::cout << "New Module Name: " << curDllName << std::endl;
+
+
+}
 int main (int argc, char** argv)
 {
     HMODULE thisModule = nullptr;
@@ -11,7 +65,12 @@ int main (int argc, char** argv)
     PIMAGE_NT_HEADERS pNtHeaders = nullptr;
     PIMAGE_SECTION_HEADER pSectionHeader = nullptr;
     PIMAGE_IMPORT_DESCRIPTOR pImportDesc = nullptr;
+    PIMAGE_IMPORT_DESCRIPTOR pFirstImportDesc = nullptr;
     PIMAGE_THUNK_DATA pThunkData = nullptr;
+    PIMAGE_THUNK_DATA pFirstThunkData = nullptr;
+    PIMAGE_IMPORT_BY_NAME pImportByName = nullptr;
+    PCHAR pHintName = 0;
+    ULONG size = 0;
 
     DWORD_PTR dwImportDir = 0;
     std::string curDllName;
@@ -29,11 +88,17 @@ int main (int argc, char** argv)
         (pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress) > 0)
     {
         // Import Descriptor Table exists.
-        dwImportDir = pNtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-        pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(UINT_PTR)thisModule + dwImportDir;
+        pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)ImageDirectoryEntryToDataEx(
+            thisModule,
+            TRUE,
+            IMAGE_DIRECTORY_ENTRY_IMPORT,
+            &size,
+            nullptr);
+        // save this entry.
+        pFirstImportDesc = pImportDesc;
 
-        // IDT contains an array of Image Import Descriptors for each 
-        // dll the exe imports (no delayed imports)
+        // Import Descriptor Entry Table contains an array of Image Import Descriptors for each 
+        // dll the exe imports from (no delayed imports)
         /*
             + 0     DWORD   OriginalFirstThunk
             + 04	DWORD	TimeDateStamp
@@ -43,23 +108,49 @@ int main (int argc, char** argv)
         */
         while (pImportDesc->Name != 0)
         {
-            curDllName = (const char*)thisModule + pImportDesc->Name;
-            // are we interested in this dll?
-            std::transform (curDllName.begin(), curDllName.end(),
-                            curDllName.begin(),
-                            [] (unsigned char c) {
-                                return std::toupper (c);
-                            });
+            
+            curDllName = ((const char*)thisModule + pImportDesc->Name);
+            std::cout << "Module: " << curDllName << std::endl;
+            std::cout << "Import Desc: " << pImportDesc << std::endl;
+            // The Image Import Descriptors contain a pointer to an array of 
+            // IMAGE_THUNK_DATA's that describe pointers to the functions
 
-            size_t found = curDllName.find(sLibs[0]);
-            if (found == std::string::npos)
+            // iterate through the thunks
+            // sometimes originalfirstthunk can be 0
+            if (pImportDesc->OriginalFirstThunk != 0)
             {
-                // dll not found, go to next entry
-                pImportDesc++;
-                continue;
+                // OriginalFirstThunk contains the array of names for the
+                // imported functions
+                pThunkData = (PIMAGE_THUNK_DATA)
+                    RVA_TO_ADDR(pDosHeader, pImportDesc->OriginalFirstThunk);
             }
+            // First thunk contains the array of addresses for the 
+            // imported functions
+            pFirstThunkData = (PIMAGE_THUNK_DATA)RVA_TO_ADDR(
+                pDosHeader, pImportDesc->FirstThunk);
+            
+            
+            // iterate function names
+            while (pThunkData->u1.AddressOfData != 0)
+            {
+                // iterate the functions or ordinals
+                if (pThunkData->u1.Ordinal & IMAGE_ORDINAL_FLAG)
+                {
+                    // ordinal (not supported in this poc)
+                    break;
+                }
+                // get the name
+                pImportByName = (PIMAGE_IMPORT_BY_NAME)
+                    RVA_TO_ADDR(pDosHeader, pThunkData->u1.AddressOfData);
+                
 
-            // now we get to the THUNK data array describing the function pointers
+                std::cout << "\tFunction: " << (char*)pImportByName->Name << 
+                    "Addr: " << pFirstThunkData->u1.Function <<  std::endl;
+
+                pThunkData++;
+                pFirstThunkData++;
+            }
+            pImportDesc++;
 
         }
 
