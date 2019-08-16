@@ -145,14 +145,20 @@ int main (int argc, char** argv)
                 
 
                 std::cout << "\tFunction: " << (char*)pImportByName->Name << 
-                    "Addr: " << pFirstThunkData->u1.Function <<  std::endl;
+                    "Addr: " << std::hex << pFirstThunkData->u1.Function <<  std::endl;
 
                 pThunkData++;
                 pFirstThunkData++;
             }
             pImportDesc++;
 
-        }
+        } // while:end
 
+        //DebugBreak();
+        RemoveImportReferences(thisModule);
+        std::cout << "Reference Removed from OptionalHeader\n";
+        std::cin.get();
+        
     }
+    return 0;
 }
