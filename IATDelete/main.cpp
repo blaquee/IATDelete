@@ -69,7 +69,7 @@ int main (int argc, char** argv)
     PIMAGE_THUNK_DATA pThunkData = nullptr;
     PIMAGE_THUNK_DATA pFirstThunkData = nullptr;
     PIMAGE_IMPORT_BY_NAME pImportByName = nullptr;
-    PCHAR pHintName = 0;
+    BOOL bContainsThunk = FALSE;
     ULONG size = 0;
 
     DWORD_PTR dwImportDir = 0;
@@ -94,8 +94,6 @@ int main (int argc, char** argv)
             IMAGE_DIRECTORY_ENTRY_IMPORT,
             &size,
             nullptr);
-        // save this entry.
-        pFirstImportDesc = pImportDesc;
 
         // Import Descriptor Entry Table contains an array of Image Import Descriptors for each 
         // dll the exe imports from (no delayed imports)
@@ -123,6 +121,7 @@ int main (int argc, char** argv)
                 // imported functions
                 pThunkData = (PIMAGE_THUNK_DATA)
                     RVA_TO_ADDR(pDosHeader, pImportDesc->OriginalFirstThunk);
+                bContainsThunk = TRUE;
             }
             // First thunk contains the array of addresses for the 
             // imported functions
@@ -130,35 +129,39 @@ int main (int argc, char** argv)
                 pDosHeader, pImportDesc->FirstThunk);
             
             
-            // iterate function names
-            while (pThunkData->u1.AddressOfData != 0)
+            // iterate function names, if original first thunk is 0, then firstthunk contains the
+            // array of names and will need to be resolved instead.
+            if (bContainsThunk)
             {
-                // iterate the functions or ordinals
-                if (pThunkData->u1.Ordinal & IMAGE_ORDINAL_FLAG)
+                while (pThunkData->u1.AddressOfData != 0)
                 {
-                    // ordinal (not supported in this poc)
-                    break;
+                    // iterate the functions or ordinals
+                    if (pThunkData->u1.Ordinal & IMAGE_ORDINAL_FLAG)
+                    {
+                        // ordinal (not supported in this poc)
+                        break;
+                    }
+                    // get the name
+                    pImportByName = (PIMAGE_IMPORT_BY_NAME)
+                        RVA_TO_ADDR(pDosHeader, pThunkData->u1.AddressOfData);
+
+                    DWORD_PTR dwFirstThunkAddress = (pFirstThunkData->u1.Function == 0) ? 0 : pFirstThunkData->u1.Function;
+                    std::cout << "\tFunction: " << (char*)pImportByName->Name <<
+                        "\tAddr: " << std::hex << dwFirstThunkAddress << std::endl;
+
+                    pThunkData++;
+                    pFirstThunkData++;
                 }
-                // get the name
-                pImportByName = (PIMAGE_IMPORT_BY_NAME)
-                    RVA_TO_ADDR(pDosHeader, pThunkData->u1.AddressOfData);
-                
-
-                std::cout << "\tFunction: " << (char*)pImportByName->Name << 
-                    "Addr: " << std::hex << pFirstThunkData->u1.Function <<  std::endl;
-
-                pThunkData++;
-                pFirstThunkData++;
+                pImportDesc++;
             }
-            pImportDesc++;
 
         } // while:end
 
         //DebugBreak();
         RemoveImportReferences(thisModule);
+
         std::cout << "Reference Removed from OptionalHeader\n";
-        std::cin.get();
-        
+        std::cin.get();        
     }
     return 0;
 }
