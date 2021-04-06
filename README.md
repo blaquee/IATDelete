@@ -1,3 +1,3 @@
 # IATDelete
 
-This project erases the IAT for ntdll/kernel32 at runtime. 
+This project erases the IAT as an anti-dumping, anti-metasploit poc.
